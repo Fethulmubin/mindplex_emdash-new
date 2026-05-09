@@ -1,0 +1,10 @@
+{
+  "name": "mindplex-plugins",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./auth": "./src/auth/index.ts",
+    "./posts": "./src/posts/index.ts"
+  }
+}
