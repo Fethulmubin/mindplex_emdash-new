@@ -8,7 +8,7 @@ type SessionMetadata = {
   location?: string;
 };
 
-export const users = pgTable("users", {
+export const users = pgTable("plugin_users", {
   id: serial("id").primaryKey(),
   username: varchar("username", { length: 60 }).unique().notNull(),
   email: varchar("email", { length: 255 }).unique().notNull(),
@@ -19,7 +19,7 @@ export const users = pgTable("users", {
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
-export const userProfiles = pgTable("user_profiles", {
+export const userProfiles = pgTable("plugin_user_profiles", {
   userId: integer("user_id")
     .primaryKey()
     .references(() => users.id, { onDelete: "cascade" }),
@@ -34,7 +34,7 @@ export const userProfiles = pgTable("user_profiles", {
   socialMedia: jsonb("social_media").$type<SocialMedia>().default({}),
 });
 
-export const userPreferences = pgTable("user_preferences", {
+export const userPreferences = pgTable("plugin_user_preferences", {
   userId: integer("user_id")
     .primaryKey()
     .references(() => users.id, { onDelete: "cascade" }),
@@ -44,7 +44,7 @@ export const userPreferences = pgTable("user_preferences", {
   privacyEducation: varchar("privacy_education", { length: 20 }).$type<PrivacyLevel>().default("private"),
 });
 
-export const userNotificationSettings = pgTable("user_notification_settings", {
+export const userNotificationSettings = pgTable("plugin_user_notification_settings", {
   userId: integer("user_id")
     .primaryKey()
     .references(() => users.id, { onDelete: "cascade" }),
@@ -56,7 +56,7 @@ export const userNotificationSettings = pgTable("user_notification_settings", {
 });
 
 export const userSocialAuths = pgTable(
-  "user_social_auths",
+  "plugin_user_social_auths",
   {
     id: serial("id").primaryKey(),
     userId: integer("user_id")
@@ -66,10 +66,10 @@ export const userSocialAuths = pgTable(
     providerId: varchar("provider_id", { length: 255 }).unique().notNull(),
     createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   },
-  (table) => [unique("user_social_auths_user_provider_idx").on(table.userId, table.provider)],
+  (table) => [unique("plugin_user_social_auths_user_provider_idx").on(table.userId, table.provider)],
 );
 
-export const refreshTokens = pgTable("refresh_tokens", {
+export const refreshTokens = pgTable("plugin_refresh_tokens", {
   id: serial("id").primaryKey(),
   userId: integer("user_id")
     .notNull()
@@ -88,7 +88,7 @@ export const refreshTokens = pgTable("refresh_tokens", {
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
-export const activationTokens = pgTable("activation_tokens", {
+export const activationTokens = pgTable("plugin_activation_tokens", {
   id: serial("id").primaryKey(),
   userId: integer("user_id")
     .notNull()

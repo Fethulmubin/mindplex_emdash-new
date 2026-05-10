@@ -1,11 +1,19 @@
 import type { PluginContext } from "emdash";
-import { pgPool } from "../../db/client";
+import { and, eq, gt } from "drizzle-orm";
+import { db } from "../../db/client";
 import { hashPassword, migrateIfLegacyHash } from "../../lib/password";
 import { issueTokenPair } from "../../lib/jwt";
 import { generateActivationToken } from "../../lib/token";
 import { toBase64 } from "../../lib/base64";
 import { isUniqueViolation } from "../../shared/errors";
-// core schema/tables are accessed via raw SQL (pgPool)
+import {
+  activationTokens,
+  refreshTokens,
+  userNotificationSettings,
+  userPreferences,
+  userProfiles,
+  users,
+} from "../../db/schema";
 import type {
   ActivateInput,
   LoginInput,
@@ -33,15 +41,21 @@ async function getJwtSecret(ctx: NativePluginContext) {
 }
 
 async function getUserByEmail(ctx: NativePluginContext, email: string) {
-  const res = await pgPool.query(`SELECT id, email, name, role FROM users WHERE email = $1 LIMIT 1`, [
-    email.toLowerCase(),
-  ]);
-  return res.rows[0] ?? null;
+  return db
+    .select()
+    .from(users)
+    .where(eq(users.email, email))
+    .limit(1)
+    .then((rows: any[]) => rows[0]);
 }
 
-async function getUserById(ctx: NativePluginContext, id: string) {
-  const res = await pgPool.query(`SELECT id, email, name, role FROM users WHERE id = $1 LIMIT 1`, [id]);
-  return res.rows[0] ?? null;
+async function getUserById(ctx: NativePluginContext, id: number) {
+  return db
+    .select()
+    .from(users)
+    .where(eq(users.id, id))
+    .limit(1)
+    .then((rows: any[]) => rows[0]);
 }
 
 export async function login(ctx: NativePluginContext) {
@@ -51,38 +65,30 @@ export async function login(ctx: NativePluginContext) {
 
   if (!user) return { error: "Invalid credentials", status: 401 };
 
-  // Get plugin-local password hash
-  const pa = await pgPool.query(`SELECT password_hash FROM plugin_local_auth WHERE user_id = $1`, [user.id]);
-  const storedHash = pa.rows[0]?.password_hash ?? null;
-
-  const { valid, migrated, newHash } = await migrateIfLegacyHash(password, storedHash);
+  const { valid, migrated, newHash } = await migrateIfLegacyHash(
+    password,
+    user.passwordHash,
+  );
   if (!valid) return { error: "Invalid credentials", status: 401 };
 
   if (migrated && newHash) {
-    await pgPool.query(`UPDATE plugin_local_auth SET password_hash = $1 WHERE user_id = $2`, [newHash, user.id]);
+    await db.update(users).set({ passwordHash: newHash }).where(eq(users.id, user.id));
   }
 
   const jwtSecret = await getJwtSecret(ctx);
-  const tokens = await issueTokenPair({ sub: user.id, email: user.email, role: user.role }, jwtSecret);
-
-  // Ensure refresh table exists and insert token
-  await pgPool.query(`
-    CREATE TABLE IF NOT EXISTS plugin_refresh_tokens (
-      id text PRIMARY KEY,
-      user_id text,
-      token text,
-      family_id text,
-      metadata jsonb,
-      expires_at text,
-      family_expires_at text,
-      created_at text DEFAULT now()
-    )
-  `);
-
-  await pgPool.query(
-    `INSERT INTO plugin_refresh_tokens(id,user_id,token,family_id,metadata,expires_at,family_expires_at,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,now())`,
-    [crypto.randomUUID(), user.id, tokens.tokenHash, tokens.familyId, JSON.stringify({ sessionId: tokens.sessionId }), tokens.expiresAt, new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()],
+  const tokens = await issueTokenPair(
+    { sub: user.id, email: user.email, role: user.role },
+    jwtSecret,
   );
+
+  await db.insert(refreshTokens).values({
+    token: tokens.tokenHash,
+    userId: user.id,
+    familyId: tokens.familyId,
+    metadata: {},
+    expiresAt: tokens.expiresAt,
+    familyExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+  });
 
   return { data: { accessToken: tokens.accessToken, refreshToken: tokens.refreshToken } };
 }
@@ -101,45 +107,26 @@ export async function register(ctx: NativePluginContext) {
   }
 
   try {
-    // Ensure local auth and refresh tables exist
-    await pgPool.query(`
-      CREATE TABLE IF NOT EXISTS plugin_local_auth (
-        user_id text PRIMARY KEY,
-        password_hash text NOT NULL
-      )
-    `);
-    await pgPool.query(`
-      CREATE TABLE IF NOT EXISTS plugin_refresh_tokens (
-        id text PRIMARY KEY,
-        user_id text,
-        token text,
-        family_id text,
-        metadata jsonb,
-        expires_at text,
-        family_expires_at text,
-        created_at text DEFAULT now()
-      )
-    `);
+    const user = await db
+      .insert(users)
+      .values({
+        email,
+        username,
+        passwordHash,
+        role: "user",
+        isActivated: false,
+      })
+      .returning({ id: users.id })
+      .then((rows: any[]) => rows[0]);
 
-    // Create user in EmDash core users table
-    const userId = crypto.randomUUID();
-    await pgPool.query(
-      `INSERT INTO users(id, email, name, role, avatar_url, email_verified, data, created_at, updated_at, disabled) VALUES($1,$2,$3,$4,$5,0,NULL,now(),now(),0)`,
-      [userId, email.toLowerCase(), username, 10, null],
-    );
+    await db.insert(userProfiles).values({ userId: user.id });
+    await db.insert(userPreferences).values({ userId: user.id });
+    await db.insert(userNotificationSettings).values({ userId: user.id });
 
-    // Store password in plugin-local auth table
-    await pgPool.query(`INSERT INTO plugin_local_auth(user_id, password_hash) VALUES($1,$2)`, [userId, passwordHash]);
-
-    // Create activation token in core auth_tokens table
     const token = generateActivationToken();
-    const expiresAt = new Date(Date.now() + 86_400_000).toISOString();
-    await pgPool.query(`INSERT INTO auth_tokens(hash, user_id, type, expires_at, created_at) VALUES($1,$2,$3,$4,now())`, [
-      token,
-      userId,
-      "email_verify",
-      expiresAt,
-    ]);
+    const expiresAt = new Date(Date.now() + 86_400_000);
+
+    await db.insert(activationTokens).values({ token, userId: user.id, expiresAt });
 
     const activationLink = `/activate?token=${token}`;
     await ctx.email.send({
@@ -149,8 +136,8 @@ export async function register(ctx: NativePluginContext) {
       text: `Activate your account: ${activationLink}`,
     });
 
-    return { data: { id: userId }, status: 201 };
-  } catch (err: any) {
+    return { data: { id: user.id }, status: 201 };
+  } catch (err) {
     if (isUniqueViolation(err)) {
       return { error: "Email or username already taken", status: 409 };
     }
@@ -161,12 +148,18 @@ export async function register(ctx: NativePluginContext) {
 export async function activate(ctx: NativePluginContext) {
   const { token } = ctx.input as ActivateInput;
 
-  const res = await pgPool.query(`SELECT hash, user_id, expires_at FROM auth_tokens WHERE hash = $1 AND type = $2 LIMIT 1`, [token, "email_verify"]);
-  const record = res.rows[0];
-  if (!record || new Date(record.expires_at) <= new Date()) return { error: "Invalid or expired token", status: 400 };
+  const record = await db
+    .select()
+    .from(activationTokens)
+    .where(and(eq(activationTokens.token, token), gt(activationTokens.expiresAt, new Date())))
+    .limit(1)
+    .then((rows: any[]) => rows[0]);
 
-  await pgPool.query(`UPDATE users SET email_verified = 1 WHERE id = $1`, [record.user_id]);
-  await pgPool.query(`DELETE FROM auth_tokens WHERE hash = $1`, [token]);
+  if (!record) return { error: "Invalid or expired token", status: 400 };
+
+  await db.update(users).set({ isActivated: true }).where(eq(users.id, record.userId));
+
+  await db.delete(activationTokens).where(eq(activationTokens.id, record.id));
 
   return { data: { ok: true } };
 }
@@ -189,14 +182,20 @@ export async function social(ctx: NativePluginContext) {
     const username = `${gData.email.split("@")[0]}_${Math.random()
       .toString(36)
       .slice(2, 6)}`;
-    const userId = ulid();
-    await pgPool.query(`INSERT INTO users(id,email,name,role,created_at,updated_at) VALUES($1,$2,$3,$4,now(),now())`, [
-      userId,
-      gData.email.toLowerCase(),
-      username,
-      10,
-    ]);
-    user = { id: userId, email: gData.email.toLowerCase(), name: username, role: 10 };
+    user = await db
+      .insert(users)
+      .values({
+        email: gData.email,
+        username,
+        role: "user",
+        isActivated: true,
+      })
+      .returning()
+      .then((rows: any[]) => rows[0]);
+
+    await db.insert(userProfiles).values({ userId: user.id });
+    await db.insert(userPreferences).values({ userId: user.id });
+    await db.insert(userNotificationSettings).values({ userId: user.id });
   }
 
   const jwtSecret = await getJwtSecret(ctx);
@@ -205,10 +204,14 @@ export async function social(ctx: NativePluginContext) {
     jwtSecret,
   );
 
-  await pgPool.query(
-    `INSERT INTO plugin_refresh_tokens(id,user_id,token,family_id,metadata,expires_at,family_expires_at,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,now())`,
-    [crypto.randomUUID(), user.id, tokens.tokenHash, tokens.familyId, JSON.stringify({ sessionId: tokens.sessionId }), tokens.expiresAt, new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()],
-  );
+  await db.insert(refreshTokens).values({
+    token: tokens.tokenHash,
+    userId: user.id,
+    familyId: tokens.familyId,
+    metadata: {},
+    expiresAt: tokens.expiresAt,
+    familyExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+  });
 
   return { data: { accessToken: tokens.accessToken, refreshToken: tokens.refreshToken } };
 }
@@ -217,14 +220,18 @@ export async function refresh(ctx: NativePluginContext) {
   const { refreshToken } = ctx.input as RefreshInput;
   const hash = await hashRefreshToken(refreshToken);
 
-  const res = await pgPool.query(`SELECT id, user_id FROM plugin_refresh_tokens WHERE token = $1 AND expires_at > now() LIMIT 1`, [hash]);
-  const token = res.rows[0];
+  const token = await db
+    .select()
+    .from(refreshTokens)
+    .where(and(eq(refreshTokens.token, hash), gt(refreshTokens.expiresAt, new Date())))
+    .limit(1)
+    .then((rows: any[]) => rows[0]);
 
   if (!token) return { error: "Invalid or expired token", status: 401 };
 
-  await pgPool.query(`DELETE FROM plugin_refresh_tokens WHERE id = $1`, [token.id]);
+  await db.delete(refreshTokens).where(eq(refreshTokens.id, token.id));
 
-  const user = await getUserById(ctx, token.user_id);
+  const user = await getUserById(ctx, token.userId);
 
   if (!user) return { error: "User not found", status: 401 };
 
@@ -234,10 +241,14 @@ export async function refresh(ctx: NativePluginContext) {
     jwtSecret,
   );
 
-  await pgPool.query(
-    `INSERT INTO plugin_refresh_tokens(id,user_id,token,family_id,metadata,expires_at,family_expires_at,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,now())`,
-    [ulid(), user.id, tokens.tokenHash, tokens.familyId, JSON.stringify({ sessionId: tokens.sessionId }), tokens.expiresAt, new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString()],
-  );
+  await db.insert(refreshTokens).values({
+    token: tokens.tokenHash,
+    userId: user.id,
+    familyId: tokens.familyId,
+    metadata: {},
+    expiresAt: tokens.expiresAt,
+    familyExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000),
+  });
 
   return { data: { accessToken: tokens.accessToken, refreshToken: tokens.refreshToken } };
 }
@@ -250,10 +261,15 @@ export async function logout(ctx: NativePluginContext) {
   if (body?.refreshToken) {
     const hash = await hashRefreshToken(body.refreshToken);
 
-    const res = await pgPool.query(`SELECT family_id FROM plugin_refresh_tokens WHERE token = $1 LIMIT 1`, [hash]);
-    const token = res.rows[0];
+    const token = await db
+      .select({ familyId: refreshTokens.familyId })
+      .from(refreshTokens)
+      .where(eq(refreshTokens.token, hash))
+      .limit(1)
+      .then((rows: any[]) => rows[0]);
+
     if (token) {
-      await pgPool.query(`DELETE FROM plugin_refresh_tokens WHERE family_id = $1`, [token.family_id]);
+      await db.delete(refreshTokens).where(eq(refreshTokens.familyId, token.familyId));
     }
   }
 
