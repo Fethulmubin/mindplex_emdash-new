@@ -1,5 +1,5 @@
 import { pgTable, serial, varchar, text, date, jsonb, boolean, timestamp, integer, unique } from "drizzle-orm/pg-core";
-import { PrivacyLevel, Role, SocialAuthProvider, SocialMedia, Theme } from "./types";
+import type { PrivacyLevel, Role, SocialAuthProvider, SocialMedia, Theme } from "./types";
 
 type SessionMetadata = {
   ip?: string;

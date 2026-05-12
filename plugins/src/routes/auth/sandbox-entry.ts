@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { definePlugin } from "emdash";
-import type { PluginContext, ResolvedPlugin } from "emdash";
+import type { PluginContext } from "emdash";
 import {
   ActivateSchema,
   LoginSchema,
@@ -10,11 +10,7 @@ import {
 } from "./schemas";
 import { activate, login, logout, refresh, register, social } from "./routes";
 
-const pluginDefinition = definePlugin({
-  id: "mindplex-auth",
-  version: "1.0.0",
-  capabilities: ["email:send", "network:request"],
-  allowedHosts: ["oauth2.googleapis.com", "www.googleapis.com"],
+export default definePlugin({
   hooks: {
     "plugin:install": {
       handler: async (_event: any, ctx: PluginContext) => {
@@ -60,9 +56,3 @@ const pluginDefinition = definePlugin({
     },
   },
 });
-
-export function createPlugin(): ResolvedPlugin {
-  return pluginDefinition as ResolvedPlugin;
-}
-
-export default createPlugin;
