@@ -5,7 +5,7 @@ export function postsPlugin(): PluginDescriptor {
     id: "mindplex-posts",
     version: "1.0.0",
     format: "standard",
-    entrypoint: "./plugins/src/routes/posts/sandbox-entry.ts",
+    entrypoint: "@mindplex/plugins/posts/sandbox",
     options: {},
     capabilities: ["content:read", "content:write"],
   };

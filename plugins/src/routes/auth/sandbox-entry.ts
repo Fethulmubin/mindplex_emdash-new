@@ -54,5 +54,13 @@ export default definePlugin({
       public: true,
       handler: logout,
     },
+    admin: {
+      // Serve Block Kit admin pages (can return Block Kit elements)
+      // EmDash only needs the route to exist for adminPages to be valid.
+      handler: async (_ctx: any) => {
+        return { blocks: [{ type: "text", text: "Auth admin" }] };
+      },
+    },
   },
+  
 });
